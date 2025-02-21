@@ -114,7 +114,7 @@ After the bot starts, you can interact with it directly from Telegram. The avail
    python3 bot.py
    ```
 
-The bot will now run in your terminal, and you can interact with it from your Telegram app.
+   The bot will now run in your terminal, and you can interact with it from your Telegram app.
 
 ### Deploying on Heroku
 
@@ -124,7 +124,7 @@ The bot will now run in your terminal, and you can interact with it from your Te
 
    Create a `Procfile` in the project directory with the following content:
 
-   ```
+   ```ini
    web: python bot.py
    ```
 
@@ -147,7 +147,7 @@ The bot will now run in your terminal, and you can interact with it from your Te
 
    In your Heroku dashboard, navigate to **Settings** > **Config Vars** and add:
 
-   ```
+   ```ini
    TELEGRAM_BOT_TOKEN=your-bot-token-here
    TELEGRAM_API_ID=your-api-id-here
    TELEGRAM_API_HASH=your-api-hash-here
@@ -159,7 +159,37 @@ The bot will now run in your terminal, and you can interact with it from your Te
    heroku ps:scale web=1
    ```
 
-The bot will run on Heroku, and you can interact with it via Telegram.
+   The bot will run on Heroku, and you can interact with it via Telegram.
+
+### Deploying on Replit
+
+Replit provides an easy way to deploy your bot without managing your own server. Follow these steps to get your bot running on Replit:
+
+1. **Create a New Repl**
+
+   - Go to [Replit](https://replit.com/) and sign in or create an account.
+   - Create a new Repl and choose **Python** as the template. Alternatively, you can import your GitHub repository by selecting the **Import from GitHub** option.
+
+2. **Add Environment Secrets**
+
+   - In the Replit sidebar, click on the **Secrets** (or **Environment Variables**) icon.
+   - Add the following secrets with their respective values:
+     - `TELEGRAM_BOT_TOKEN`
+     - `TELEGRAM_API_ID`
+     - `TELEGRAM_API_HASH`
+
+3. **Configure the Run Command**
+
+   Create a file named `.replit` in your project directory with the following content to specify how the bot should run:
+
+   ```ini
+   run = "python bot.py"
+   ```
+
+4. **Run the Bot**
+
+   - Click the **Run** button at the top of the Replit interface.
+   - The console will start, and your bot will begin running. You can now interact with it via Telegram.
 
 ## Troubleshooting
 
