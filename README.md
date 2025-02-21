@@ -1,47 +1,51 @@
 
 # Telegram Mega Cleaner Bot
 
-This bot allows you to delete all messages from a channel in Telegram. It can operate in two modes:
+This is a powerful Telegram bot that allows users to delete all messages from a Telegram channel. The bot can work in two modes:
 
 1. **User Mode**: Use your own API credentials for full access to delete messages from channels.
 2. **Admin Mode**: Operate as a bot in channels where it has admin rights. It has limited access due to Telegram's restrictions.
 
 ## Features
 
-- **User Mode**: Allows the bot to delete messages from a channel using the user's personal API credentials.
-- **Admin Mode**: Allows the bot to delete messages in a channel where it has admin rights.
-- **Rate Limiting**: The bot handles rate limits and flood waits automatically.
-- **Bot Cooldown**: To prevent abuse, the bot has a 30-second cooldown between actions for each user.
+- **User Mode**: The bot can delete messages using the user's personal API credentials.
+- **Admin Mode**: The bot can delete messages in channels where it has admin rights (with limited functionality due to Telegram restrictions).
+- **Rate Limiting**: The bot handles rate limits and flood waits automatically to ensure smooth operation.
+- **Bot Cooldown**: A cooldown of 30 seconds is enforced between actions to prevent abuse.
 
 ## Prerequisites
 
-Before you begin, make sure you have the following:
+Before you start, make sure you have the following:
 
-- A Telegram bot token, which you can get by creating a bot on [BotFather](https://core.telegram.org/bots#botfather).
-- An API ID and API hash from [my.telegram.org](https://my.telegram.org/auth).
-- Python 3.7 or higher.
-- `pip` to install dependencies.
+- **Telegram Bot Token**: You can obtain this by creating a bot on [BotFather](https://core.telegram.org/bots#botfather).
+- **API ID and API Hash**: These can be obtained by registering your application on [my.telegram.org](https://my.telegram.org/auth).
+- **Python 3.7+**: Make sure Python 3.7 or higher is installed on your system.
+- **pip**: To install the required dependencies.
 
-## Installation
+## Installation Steps
 
-### 1. Clone this repository
+### 1. Clone the Repository
+
+Clone the repository to your local machine:
 
 ```bash
-git clone https://github.com/your-username/telegram-mega-cleaner-bot.git
-cd telegram-mega-cleaner-bot
+git clone https://github.com/Anujtemp/deleteposttg.git
+cd deleteposttg
 ```
 
-### 2. Install dependencies
+### 2. Install Dependencies
 
-Make sure you have all the necessary dependencies by installing them via `pip`:
+Install the required Python dependencies by running:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Create a `.env` file
+This will install all the necessary libraries, including `Telethon` for interacting with the Telegram API.
 
-In the project directory, create a `.env` file and add your Telegram bot credentials and API credentials:
+### 3. Set Up Environment Variables
+
+Create a `.env` file in the project directory and add the following environment variables with your bot token, API ID, and API hash:
 
 ```ini
 TELEGRAM_BOT_TOKEN=your-bot-token-here
@@ -49,42 +53,124 @@ TELEGRAM_API_ID=your-api-id-here
 TELEGRAM_API_HASH=your-api-hash-here
 ```
 
-You can obtain the `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org/auth).
+You can obtain the **API ID** and **API Hash** from [my.telegram.org](https://my.telegram.org/auth).
 
-### 4. Run the Bot
+### 4. Running the Bot
 
-After setting up your `.env` file, you can start the bot by running the following:
+To run the bot, simply execute the following command:
 
 ```bash
 python bot.py
 ```
 
-The bot will now be running and can be accessed in Telegram.
+Once the bot is running, it will listen for incoming messages and commands in Telegram.
 
-## Usage
+### 5. Interacting with the Bot
 
-### Start the bot
+After the bot starts, you can interact with it directly from Telegram. The available commands are:
 
-Once the bot is running, you can start interacting with it on Telegram by typing `/start`. You will be prompted to select either **User Mode** or **Admin Mode**:
+- **/start**: Start the bot and choose an operation mode.
+- **/cancel**: Cancel any ongoing operation.
+- **/user_mode**: Use your own API credentials to delete messages from a channel.
+- **/admin_mode**: Use the bot as an admin in a channel to delete messages (restricted).
+- **/help**: Get a help message showing available commands and usage instructions.
 
-- **User Mode**: Requires you to provide your personal API credentials (API ID, API HASH, and phone number).
-- **Admin Mode**: Requires the bot to be an admin in the channel where you want to delete the messages.
+### 6. Deploying the Bot (Optional)
 
-You will be asked to confirm the deletion process by typing **DELETE ALL** or **CONFIRM ADMIN DELETE** to proceed.
+If you'd like to deploy this bot on a remote server or cloud platform, here are some common methods:
 
-### Commands
+#### Deploying on a Linux Server (e.g., Ubuntu)
 
-- `/start`: Start the bot and choose a mode.
-- `/cancel`: Cancel any ongoing operation.
-- `/help`: Show the help menu.
-- `/user_mode`: Operate the bot using your personal credentials.
-- `/admin_mode`: Operate the bot in channels where it has admin rights.
+1. **Install Python 3 and pip**
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip
+```
+
+2. **Clone the Repository on the Server**
+
+```bash
+git clone https://github.com/Anujtemp/deleteposttg.git
+cd deleteposttg
+```
+
+3. **Install Dependencies**
+
+```bash
+pip3 install -r requirements.txt
+```
+
+4. **Set Up Environment Variables**
+
+Create a `.env` file on your server with the necessary credentials.
+
+```bash
+TELEGRAM_BOT_TOKEN=your-bot-token-here
+TELEGRAM_API_ID=your-api-id-here
+TELEGRAM_API_HASH=your-api-hash-here
+```
+
+5. **Run the Bot**
+
+Start the bot by running:
+
+```bash
+python3 bot.py
+```
+
+Now the bot will continue running in the terminal, and you can interact with it from your Telegram app.
+
+#### Deploying on Heroku (Cloud Deployment)
+
+1. **Create a Heroku Account**: If you don’t have a Heroku account, sign up [here](https://signup.heroku.com/).
+2. **Install Heroku CLI**: Follow the instructions [here](https://devcenter.heroku.com/articles/heroku-cli) to install the Heroku CLI on your system.
+3. **Prepare Your Project for Heroku**
+
+Create a `Procfile` in the project directory with the following content:
+
+```
+web: python bot.py
+```
+
+Create a `requirements.txt` file if you don’t already have one (it lists all dependencies needed by Heroku):
+
+```bash
+pip freeze > requirements.txt
+```
+
+4. **Deploy to Heroku**
+
+Use the Heroku CLI to create a new app and push the code to Heroku:
+
+```bash
+heroku create your-app-name
+git push heroku master
+```
+
+5. **Set the Environment Variables on Heroku**
+
+Go to your Heroku dashboard, select your app, and navigate to **Settings** > **Config Vars**. Add the following variables:
+
+```
+TELEGRAM_BOT_TOKEN=your-bot-token-here
+TELEGRAM_API_ID=your-api-id-here
+TELEGRAM_API_HASH=your-api-hash-here
+```
+
+6. **Scale Your Heroku App**
+
+```bash
+heroku ps:scale web=1
+```
+
+The bot will now be live on Heroku and you can interact with it from Telegram.
 
 ## Troubleshooting
 
-- If you encounter **FloodWaitError**, it means that you have been rate-limited by Telegram. The bot will automatically wait for the specified time before retrying.
-- Ensure that the bot has the correct permissions in the channel when using **Admin Mode**.
-- Make sure you are using the correct format for API ID, API HASH, and phone number.
+- **FloodWaitError**: This error occurs when the bot exceeds the allowed message request rate. The bot will automatically wait for the specified time before retrying.
+- **Invalid API credentials**: Make sure that the `API_ID`, `API_HASH`, and phone number are correct.
+- **Bot not added as admin in channel (Admin Mode)**: Ensure the bot has the required permissions to delete messages in the channel.
 
 ## License
 
@@ -93,4 +179,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Thanks to [Telethon](https://github.com/LonamiWebs/Telethon) for providing the Python wrapper for Telegram's MTProto API.
-- Bot creation was inspired by several Telegram bot automation projects.
+- The bot was created based on Telegram bot automation projects.
