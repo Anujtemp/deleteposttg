@@ -1,9 +1,35 @@
+import sys
+import subprocess
+
+# Attempt to import required modules; if missing, install via requirements.txt
+required_modules = [
+    ('telethon', 'telethon>=1.29.0'),
+    ('dotenv', 'python-dotenv>=1.0.0')
+]
+
+missing = []
+for module, package_spec in required_modules:
+    try:
+        __import__(module)
+    except ImportError:
+        missing.append(package_spec)
+
+if missing:
+    print("Missing modules detected. Installing from requirements.txt...")
+    try:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
+    except Exception as install_error:
+        print("Error installing required packages:", install_error)
+        sys.exit(1)
+
+# Now import all required modules (they should be installed by now)
 import logging
 import os
 import re
-import time
+import time  # Make sure to import time!
 import asyncio
-from telethon import TelegramClient, events
+from typing import Dict, Optional
+from telethon import TelegramClient, events, Button
 from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeExpiredError,
@@ -11,9 +37,10 @@ from telethon.errors import (
     PhoneNumberInvalidError,
     ApiIdInvalidError,
     ChannelPrivateError,
-    FloodWaitError
+    FloodWaitError,
+    BadRequestError
 )
-from telethon.tl.custom import Button
+from telethon.tl.custom import Conversation
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -21,24 +48,34 @@ load_dotenv()
 
 # Setup logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 # Environment variables
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-API_ID = int(os.getenv('TELEGRAM_API_ID'))
-API_HASH = os.getenv('TELEGRAM_API_HASH')
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+API_ID = int(os.getenv("TELEGRAM_API_ID"))
+API_HASH = os.getenv("TELEGRAM_API_HASH")
 
-# Global cooldown dictionary to prevent abuse
-COOLDOWN = {}
+# State management
+USER_STATES: Dict[int, str] = {}  # Tracks user state (e.g., 'user_mode', 'admin_mode')
+ACTIVE_CONVERSATIONS: Dict[int, Optional[Conversation]] = {}  # Tracks active conversations
+COOLDOWN: Dict[int, float] = {}  # Tracks cooldown timers for users
+
+# Constants
+COOLDOWN_TIME = 30  # seconds
+MAX_RETRIES = 3
+PHONE_REGEX = r"^\+?[1-9]\d{7,14}$"
 
 class ValidationError(Exception):
     pass
 
+class OperationCancelled(Exception):
+    pass
+
 def validate_phone_number(phone: str) -> bool:
-    return re.match(r'^\+?[1-9]\d{7,14}$', phone) is not None
+    return re.match(PHONE_REGEX, phone) is not None
 
 def validate_channel_id(channel_id: str) -> int:
     try:
@@ -49,225 +86,280 @@ def validate_channel_id(channel_id: str) -> int:
     except ValueError:
         raise ValidationError("Invalid Channel ID format")
 
+async def cleanup(client: Optional[TelegramClient] = None):
+    if client and client.is_connected():
+        await client.disconnect()
+
+async def cancel_operation(user_id: int):
+    if user_id in ACTIVE_CONVERSATIONS:
+        conv = ACTIVE_CONVERSATIONS.pop(user_id)
+        if conv:
+            await conv.cancel()
+    USER_STATES.pop(user_id, None)
+    COOLDOWN.pop(user_id, None)
+
+async def send_main_menu(event, message: str = None):
+    user = await event.get_sender()
+    text = f"👋 Welcome {user.first_name}!\n" if message is None else message
+    text += (
+        "\n🔧 Choose an operation mode:\n\n"
+        "• `User Mode`: Use your own API credentials\n"
+        "• `Admin Mode`: I must be admin in target channel\n\n"
+        "_Type /cancel anytime to return here_"
+    )
+    
+    buttons = [
+        [Button.inline("User Mode", b"user_mode"),
+         Button.inline("Admin Mode", b"admin_mode")],
+        [Button.inline("Help", b"help")]
+    ]
+    
+    await event.respond(text, buttons=buttons, parse_mode="md")
+    USER_STATES[event.chat_id] = "main_menu"
+
+async def handle_cancel(event):
+    user_id = event.chat_id
+    await cancel_operation(user_id)
+    await event.respond("❌ Operation cancelled", buttons=Button.clear())
+    await send_main_menu(event, "Operation cancelled. Choose a mode:")
+
 async def delete_all_posts(client: TelegramClient, channel_id: int):
     try:
         await client.get_entity(channel_id)
-    except ValueError:
-        raise ChannelPrivateError("Channel not found or access denied")
-
-    message_ids = []
-    async for message in client.iter_messages(channel_id):
-        message_ids.append(message.id)
-        if len(message_ids) >= 100:
-            try:
-                await client.delete_messages(channel_id, message_ids, revoke=True)
-                logger.info(f"Deleted {len(message_ids)} messages in {channel_id}")
-                message_ids = []
-                time.sleep(1)  # Rate limit control
-            except FloodWaitError as e:
-                logger.warning(f"Flood wait: Sleeping {e.seconds} seconds")
-                time.sleep(e.seconds)
-            except Exception as e:
-                logger.error(f"Deletion error: {e}")
+    except (ValueError, ChannelPrivateError):
+        raise ChannelPrivateError("Channel not found/private")
     
-    if message_ids:
+    deleted_count = 0
+    async for message in client.iter_messages(channel_id):
         try:
-            await client.delete_messages(channel_id, message_ids, revoke=True)
-            logger.info(f"Deleted final batch of {len(message_ids)} messages")
+            await message.delete()
+            deleted_count += 1
+            if deleted_count % 10 == 0:
+                await asyncio.sleep(1)
+        except FloodWaitError as e:
+            logger.warning(f"Flood wait: {e.seconds}s")
+            await asyncio.sleep(e.seconds)
         except Exception as e:
-            logger.error(f"Final deletion error: {e}")
+            logger.error(f"Delete error: {e}")
+    
+    return deleted_count
 
-async def authenticate_user(conv, phone: str, api_id: int, api_hash: str):
+async def authenticate_user(conv: Conversation, phone: str, api_id: int, api_hash: str):
     client = TelegramClient(None, api_id, api_hash)
     await client.connect()
-
+    
     try:
         if not await client.is_user_authorized():
-            await client.send_code_request(phone)
-            await conv.send_message("Enter the 5-digit code you received (format: 1 2 3 4 5):")
+            sent_code = await client.send_code_request(phone)
+            code_type = sent_code.type.__class__.__name__
             
-            code = (await conv.get_response()).text.strip().replace(' ', '')
+            hint = "code" if code_type == "SentCodeTypeApp" else "Telegram message"
+            await conv.send_message(
+                f"Enter the 5-digit code received via {hint} (format: `1 2 3 4 5`):",
+                parse_mode="md"
+            )
+            
+            response = await conv.get_response()
+            if response.text.lower() == "/cancel":
+                raise OperationCancelled()
+            
+            code = response.text.replace(" ", "")
             if not code.isdigit() or len(code) != 5:
                 raise ValidationError("Invalid code format")
             
             try:
-                await client.sign_in(phone, code)
+                await client.sign_in(phone, code=code)
             except SessionPasswordNeededError:
-                await conv.send_message("Enter your 2FA password:")
+                await conv.send_message("🔑 Enter your 2FA password:")
                 password = (await conv.get_response()).text
                 await client.sign_in(password=password)
         
         return client
     except Exception as e:
-        await client.disconnect()
+        await cleanup(client)
         raise e
 
-async def handle_cancel(conv):
-    await conv.send_message("Operation cancelled.")
-    raise events.StopPropagation
-
 async def user_mode_flow(event):
+    user_id = event.chat_id
+    client: Optional[TelegramClient] = None
     async with event.client.conversation(event.chat_id, timeout=600) as conv:
+        ACTIVE_CONVERSATIONS[user_id] = conv
         try:
-            # API ID
-            await conv.send_message("Enter your API ID (get it from https://my.telegram.org):")
-            api_id = (await conv.get_response()).text.strip()
-            if not api_id.isdigit():
-                await conv.send_message("Invalid API ID. Must be a number.")
-                return
-
-            # API HASH
-            await conv.send_message("Enter your API HASH:")
-            api_hash = (await conv.get_response()).text.strip()
-            if len(api_hash) != 32 or not re.match(r'^[a-f0-9]+$', api_hash):
-                await conv.send_message("Invalid API HASH format.")
-                return
-
-            # Phone Number
-            await conv.send_message("Enter your phone number (international format, e.g., +1234567890):")
-            phone = (await conv.get_response()).text.strip()
-            if not validate_phone_number(phone):
-                await conv.send_message("Invalid phone number format.")
-                return
-
-            # Channel ID
-            await conv.send_message("Enter the channel ID (e.g., -100123456789):")
-            channel_id = validate_channel_id((await conv.get_response()).text.strip())
-
-            # Authenticate using user credentials for full access
-            client = await authenticate_user(conv, phone, int(api_id), api_hash)
+            await conv.send_message(
+                "📝 **User Mode Setup**\n\n"
+                "1. Get API credentials from [my.telegram.org](https://my.telegram.org)\n"
+                "2. Enter them below\n\n"
+                "_Type /cancel to abort_",
+                parse_mode="md",
+                link_preview=False
+            )
             
-            # Verify channel access
+            # API ID
+            await conv.send_message("🔢 Enter your **API_ID**:")
+            api_id_text = (await conv.get_response()).text
+            if not api_id_text.isdigit():
+                raise ValidationError("API ID must be a number")
+            api_id_input = int(api_id_text)
+            
+            # API HASH
+            await conv.send_message("🔑 Enter your **API_HASH**:")
+            api_hash = (await conv.get_response()).text
+            if len(api_hash) != 32 or not re.match(r"^[a-f0-9]+$", api_hash):
+                raise ValidationError("Invalid API HASH format")
+            
+            # Phone Number
+            await conv.send_message("📱 Enter your phone number (e.g., +12345678901):")
+            phone = (await conv.get_response()).text
+            if not validate_phone_number(phone):
+                raise ValidationError("Invalid phone number")
+            
+            # Channel ID
+            await conv.send_message("🆔 Enter channel ID (e.g., -100123456789):")
+            channel_id = validate_channel_id((await conv.get_response()).text)
+            
+            # Authentication
+            client = await authenticate_user(conv, phone, api_id_input, api_hash)
+            
+            # Channel verification
             try:
                 await client.get_entity(channel_id)
-            except ValueError:
-                await conv.send_message("❌ Channel not found or access denied.")
-                return
-
-            # Confirmation for deletion
-            confirm_msg = f"⚠️ WARNING: This will delete ALL messages in channel {channel_id}. Type 'DELETE ALL' to confirm:"
-            await conv.send_message(confirm_msg)
-            confirmation = (await conv.get_response()).text.strip()
-            if confirmation.lower() != 'delete all':
-                await conv.send_message("❌ Deletion cancelled.")
-                return
-
-            # Start deletion process
-            await conv.send_message("🚀 Starting deletion process...")
-            await delete_all_posts(client, channel_id)
-            await conv.send_message("✅ All messages deleted successfully!")
+            except (ValueError, ChannelPrivateError):
+                raise ChannelPrivateError("Channel access denied")
             
-        except ValidationError as e:
-            await conv.send_message(f"❌ Validation error: {str(e)}")
-        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
-            await conv.send_message("❌ Invalid/expired code. Please start over.")
-        except (PhoneNumberInvalidError, ValueError):
-            await conv.send_message("❌ Invalid phone number format.")
-        except ApiIdInvalidError:
-            await conv.send_message("❌ Invalid API ID/HASH combination.")
-        except ChannelPrivateError:
-            await conv.send_message("❌ Channel access denied. Check permissions.")
-        except FloodWaitError as e:
-            await conv.send_message(f"⏳ Flood control: Please wait {e.seconds} seconds before trying again.")
+            # Confirmation
+            await conv.send_message(
+                f"⚠️ **WARNING**: This will delete ALL messages in channel `{channel_id}`\n\n"
+                "Type `CONFIRM DELETE` to proceed:",
+                parse_mode="md"
+            )
+            confirmation = (await conv.get_response()).text
+            if confirmation.lower() != "confirm delete":
+                raise OperationCancelled()
+            
+            progress = await conv.send_message("⏳ Starting deletion...")
+            deleted = await delete_all_posts(client, channel_id)
+            await progress.edit(f"✅ Successfully deleted {deleted} messages!")
+            
+        except OperationCancelled:
+            await event.respond("❌ Deletion cancelled")
         except Exception as e:
-            logger.error(f"User mode error: {str(e)}")
-            await conv.send_message("❌ An error occurred. Please try again later.")
+            await event.respond(f"❌ Error: {str(e)}")
         finally:
-            if 'client' in locals():
-                await client.disconnect()
+            await cleanup(client)
+            await send_main_menu(event)
 
 async def admin_mode_flow(event):
-    async with event.client.conversation(event.chat_id, timeout=300) as conv:
+    user_id = event.chat_id
+    async with event.client.conversation(event.chat_id, timeout=600) as conv:
+        ACTIVE_CONVERSATIONS[user_id] = conv
         try:
-            await conv.send_message("Enter the channel ID where I'm admin (e.g., -100123456789):")
-            channel_id = validate_channel_id((await conv.get_response()).text.strip())
-
-            # Warning regarding bot API limitations
-            warning_message = (
-                "⚠️ Note: Bot accounts have restricted access to the full message history. "
-                "For complete deletion of all posts, please use User Mode with your personal credentials."
+            await conv.send_message(
+                "🛡️ **Admin Mode Setup**\n\n"
+                "Requirements:\n"
+                "1. Add me as admin in the channel\n"
+                "2. Grant delete messages permission\n\n"
+                "_Type /cancel to abort_",
+                parse_mode="md"
             )
-            await conv.send_message(warning_message)
-
-            # Verify admin status
+            
+            await conv.send_message("🆔 Enter channel ID (e.g., -100123456789):")
+            channel_id = validate_channel_id((await conv.get_response()).text)
+            
             try:
                 channel = await event.client.get_entity(channel_id)
                 me = await event.client.get_me()
                 perms = await event.client.get_permissions(channel, me)
-                if not perms.is_admin or not perms.delete_messages:
-                    raise PermissionError("Bot is not admin or lacks delete permissions in the channel.")
+                if not (perms.is_admin and perms.delete_messages):
+                    raise PermissionError("Missing admin permissions")
             except (ValueError, ChannelPrivateError):
-                await conv.send_message("❌ Channel not found or I'm not added as admin.")
-                return
-
-            # Confirmation for deletion
-            confirm_msg = f"⚠️ WARNING: This will attempt to delete ALL messages in {channel.title}. Type 'CONFIRM ADMIN DELETE' to proceed:"
-            await conv.send_message(confirm_msg)
-            confirmation = (await conv.get_response()).text.strip()
-            if confirmation.lower() != 'confirm admin delete':
-                await conv.send_message("❌ Deletion cancelled.")
-                return
-
-            # Start deletion process (may be limited by bot API restrictions)
-            await conv.send_message("🚀 Starting admin deletion process...")
-            await delete_all_posts(event.client, channel_id)
-            await conv.send_message("✅ All messages deleted successfully!")
+                raise ChannelPrivateError("Channel not found/access denied")
             
-        except ValidationError as e:
-            await conv.send_message(f"❌ Validation error: {str(e)}")
-        except PermissionError as e:
-            await conv.send_message(f"❌ {str(e)}")
-        except FloodWaitError as e:
-            await conv.send_message(f"⏳ Flood control: Please wait {e.seconds} seconds before trying again.")
+            await conv.send_message(
+                f"⚠️ **WARNING**: This will delete ALL messages in {channel.title}\n\n"
+                "Type `CONFIRM ADMIN DELETE` to proceed:",
+                parse_mode="md"
+            )
+            confirmation = (await conv.get_response()).text
+            if confirmation.lower() != "confirm admin delete":
+                raise OperationCancelled()
+            
+            progress = await conv.send_message("⏳ Starting admin deletion...")
+            deleted = await delete_all_posts(event.client, channel_id)
+            await progress.edit(f"✅ Deleted {deleted} messages using admin privileges!")
+            
         except Exception as e:
-            logger.error(f"Admin mode error: {str(e)}")
-            await conv.send_message("❌ An error occurred. Please try again later.")
+            await event.respond(f"❌ Admin mode error: {str(e)}")
+        finally:
+            await send_main_menu(event)
 
 # Initialize the bot
 bot = TelegramClient(f'bot_session_{int(time.time())}', API_ID, API_HASH)
 
+# Event handlers
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    buttons = [
-        [Button.text("User Mode (Own Credentials)")],
-        [Button.text("Admin Mode (Bot as Admin)")],
-        [Button.text("Cancel")]
-    ]
-    await event.respond(
-        "🔧 Choose operation mode:\n\n"
-        "• User Mode: Use your own API credentials for full access\n"
-        "• Admin Mode: Operate as a bot (limited access due to Telegram restrictions)\n\n"
-        "Type /cancel anytime to abort.",
-        buttons=buttons
-    )
-
-@bot.on(events.NewMessage(pattern=r'(User Mode|Admin Mode)'))
-async def mode_handler(event):
-    if COOLDOWN.get(event.sender_id, 0) > time.time():
-        await event.respond("⏳ Please wait before performing another operation.")
-        return
-
-    COOLDOWN[event.sender_id] = time.time() + 30  # 30-second cooldown
-
-    mode = event.pattern_match.group(1)
-    try:
-        if mode == "User Mode":
-            await user_mode_flow(event)
-        elif mode == "Admin Mode":
-            await admin_mode_flow(event)
-    except Exception as e:
-        logger.error(f"Mode handler error: {str(e)}")
+    await send_main_menu(event, "⚡ Hi! Welcome to Telegram Mega Cleaner Bot!")
 
 @bot.on(events.NewMessage(pattern='/cancel'))
 async def cancel_handler(event):
-    await event.respond("❌ Operation cancelled.")
-    raise events.StopPropagation
+    await handle_cancel(event)
 
+@bot.on(events.CallbackQuery)
+async def callback_handler(event):
+    user_id = event.chat_id
+    current_time = time.time()
+    cooldown_time = COOLDOWN.get(user_id)
+    if cooldown_time is not None and cooldown_time > current_time:
+        await event.answer("⏳ Please wait before another action", alert=True)
+        return
+    
+    COOLDOWN[user_id] = current_time + COOLDOWN_TIME
+    
+    try:
+        await event.answer()
+        choice = event.data.decode()  # now choice is a string
+        
+        if choice == "user_mode":
+            if USER_STATES.get(user_id) != "user_mode":
+                USER_STATES[user_id] = "user_mode"
+                await user_mode_flow(event)
+        elif choice == "admin_mode":
+            if USER_STATES.get(user_id) != "admin_mode":
+                USER_STATES[user_id] = "admin_mode"
+                await admin_mode_flow(event)
+        elif choice == "help":
+            await event.edit(
+                "🆘 **Help Menu**\n\n"
+                "• User Mode: Use your own API credentials for full access\n"
+                "• Admin Mode: Requires bot admin rights in channel\n\n"
+                "⚠️ Always backup important data before deletion!",
+                parse_mode="md"
+            )
+    except FloodWaitError as e:
+        logger.error(f"Flood wait error: please wait for {e.seconds} seconds.")
+        await event.respond(f"⏳ You need to wait for {e.seconds} seconds before retrying.")
+        await asyncio.sleep(e.seconds)
+    except Exception as e:
+        logger.error(f"Callback error: {str(e)}")
+        await event.respond("❌ An error occurred. Please try again.")
+
+@bot.on(events.NewMessage)
+async def message_handler(event):
+    user_id = event.chat_id
+    if USER_STATES.get(user_id) == "main_menu":
+        await send_main_menu(event, "Please choose a mode from the buttons below:")
+
+# Main function
 async def main():
-    await bot.start(bot_token=BOT_TOKEN)
-    logger.info("Bot started successfully")
-    await bot.run_until_disconnected()
+    while True:
+        try:
+            await bot.start(bot_token=BOT_TOKEN)
+            logger.info(f"Bot started as @{(await bot.get_me()).username}")
+            await bot.run_until_disconnected()
+            break
+        except FloodWaitError as e:
+            logger.error(f"Flood wait error: please wait for {e.seconds} seconds.")
+            await asyncio.sleep(e.seconds)
 
-if __name__ == '__main__':
-    import asyncio
+if __name__ == "__main__":
     asyncio.run(main())
